@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Ambient Weather Visible</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tone/15.3.5/Tone.js"></script>
+</head>
+
+<body class="min-h-screen transition-colors duration-700 bg-gradient-to-b from-slate-100 to-slate-300">
+<main class="min-h-screen flex items-center justify-center p-6">
+  <div class="w-full max-w-xl rounded-3xl bg-white/70 backdrop-blur shadow-xl border border-white/60 p-6">
+    <h1 class="text-xl font-semibold">Ambient Weather</h1>
+    <p class="text-sm text-slate-600 mb-4">天気・風速・季節・時間帯に同期（見える化 / AirPlay）</p>
+
+    <div class="flex flex-wrap gap-2 mb-4">
+      <button id="startBtn" class="px-3 py-2 rounded-xl bg-emerald-600 text-white">Start</button>
+      <button id="refreshBtn" class="px-3 py-2 rounded-xl bg-slate-900 text-white">自動取得</button>
+      <button id="pingBtn" class="px-3 py-2 rounded-xl bg-slate-700 text-white">Ping</button>
+    </div>
+
+    <div class="grid grid-cols-2 gap-3 text-center">
+      <div class="p-3 bg-white/80 rounded-xl border"><div class="text-xs text-slate-500">天気コード</div><div id="weather" class="text-lg font-semibold">-</div></div>
+      <div class="p-3 bg-white/80 rounded-xl border"><div class="text-xs text-slate-500">風速</div><div id="wind" class="text-lg font-semibold">-</div></div>
+      <div class="p-3 bg-white/80 rounded-xl border"><div class="text-xs text-slate-500">時間帯</div><div id="dayPart" class="text-lg font-semibold">-</div></div>
+      <div class="p-3 bg-white/80 rounded-xl border"><div class="text-xs text-slate-500">季節</div><div id="season" class="text-lg font-semibold">-</div></div>
+      <div class="col-span-2 p-3 bg-white/80 rounded-xl border">
+        <div class="text-xs text-slate-500">現在のスケール</div>
+        <div id="scale" class="text-lg font-semibold">-</div>
+      </div>
+    </div>
+
+    <div class="mt-4">
+      <audio id="airplay" controls playsinline class="w-full"></audio>
+      <div class="text-xs text-slate-500 mt-2">HomePodへ：audioのAirPlayアイコン or コントロールセンターで出力先変更</div>
+    </div>
+
+    <div id="status" class="mt-3 text-sm text-slate-700">待機中（「自動取得」を押してね）</div>
+  </div>
+</main>
+
+<script>
+const OPEN_METEO = "https://api.open-meteo.com/v1/forecast";
+let synth=null, loop=null, weatherData=null, streamDest=null;
+
+const isRain=c=>[51,53,55,56,57,61,63,65,66,67,80,81,82,95,96,99].includes(c);
+const isClear=c=>(c===0||c===1||c===2);
+
+function setStatus(t){ document.getElementById("status").textContent=t; }
+
+function getDayPartJP(){
+  const h=new Date().getHours();
+  if(h>=5&&h<10) return "朝";
+  if(h>=10&&h<17) return "昼";
+  if(h>=17&&h<21) return "夕方";
+  return "夜";
+}
+function getSeasonJP(){
+  const m=new Date().getMonth()+1;
+  if(m>=3&&m<=5) return "春";
+  if(m>=6&&m<=8) return "夏";
+  if(m>=9&&m<=11) return "秋";
+  return "冬";
+}
+function windToInterval(w){
+  const ww=Math.max(0,Math.min(w,15));
+  return Math.max(0.18,1.2-(ww/15)*0.9);
+}
+function getScale(code){
+  if(isClear(code)) return ["C4","D4","E4","G4","A4","C5"];
+  if(isRain(code))  return ["A2","C3","D3","E3","G3","A3"];
+  return ["D3","E3","F3","A3","B3","D4"];
+}
+function scaleLabel(code){
+  if(isClear(code)) return "明るめ（晴れ）";
+  if(isRain(code))  return "落ち着き（雨）";
+  return "中間（くもり等）";
+}
+function setBackground(code){
+  document.body.className="min-h-screen transition-colors duration-700 bg-gradient-to-b";
+  if(isClear(code)) document.body.classList.add("from-orange-50","to-orange-200");
+  else if(isRain(code)) document.body.classList.add("from-indigo-950","to-slate-900");
+  else document.body.classList.add("from-slate-100","to-slate-300");
+}
+
+async function fetchWeather(lat,lon){
+  const url = `${OPEN_METEO}?latitude=${lat}&longitude=${lon}&current=weather_code,wind_speed_10m&timezone=auto`;
+  const res = await fetch(url);
+  if(!res.ok) throw new Error("Open-Meteo取得失敗");
+  const data = await res.json();
+  const code = data?.current?.weather_code;
+  const wind = data?.current?.wind_speed_10m;
+  if(typeof code!=="number"||typeof wind!=="number") throw new Error("データ形式が不正");
+  return {code, wind};
+}
+
+function applyUI(){
+  document.getElementById("weather").textContent = weatherData.code;
+  document.getElementById("wind").textContent = weatherData.wind.toFixed(1);
+  document.getElementById("dayPart").textContent = getDayPartJP();
+  document.getElementById("season").textContent = getSeasonJP();
+  document.getElementById("scale").textContent = scaleLabel(weatherData.code);
+  setBackground(weatherData.code);
+}
+
+function ensureSynth(){
+  if(synth) return;
+  const reverb=new Tone.Reverb({decay:4, wet:0.30}).toDestination();
+  const filter=new Tone.Filter({type:"lowpass", frequency:1200}).connect(reverb);
+  synth=new Tone.PolySynth(Tone.Synth,{
+    oscillator:{type:"sine"},
+    envelope:{attack:0.01, decay:0.2, sustain:0, release:1.0}
+  }).connect(filter);
+  synth._filter=filter; synth._reverb=reverb;
+}
+
+async function ensureAirPlay(){
+  if(streamDest) return;
+  const ctx=Tone.getContext().rawContext;
+  streamDest=ctx.createMediaStreamDestination();
+  try{ Tone.Destination.output.connect(streamDest); }catch(e){}
+  const el=document.getElementById("airplay");
+  el.srcObject=streamDest.stream;
+  try{ await el.play(); }catch(e){}
+}
+
+function rebuildLoop(){
+  if(!weatherData) return;
+  const scale=getScale(weatherData.code);
+  const interval=windToInterval(weatherData.wind);
+
+  if(loop){ loop.dispose(); loop=null; }
+  loop=new Tone.Loop(time=>{
+    const note=scale[Math.floor(Math.random()*scale.length)];
+    synth.triggerAttackRelease(note, 0.08, time, 0.55);
+  }, interval).start(0);
+}
+
+async function updateWeather(){
+  setStatus("位置情報→天気取得中…（許可してね）");
+  if(!navigator.geolocation){
+    setStatus("この端末は位置情報に非対応");
+    return;
+  }
+  navigator.geolocation.getCurrentPosition(async pos=>{
+    try{
+      weatherData = await fetchWeather(pos.coords.latitude, pos.coords.longitude);
+      applyUI();
+      setStatus("取得OK（Startで再生）");
+      if(Tone.Transport.state==="started") rebuildLoop();
+    }catch(e){
+      setStatus("天気取得エラー: " + e.message);
+    }
+  }, err=>{
+    setStatus(`位置情報エラー: ${err.message}（Safariのサイト設定で位置情報を許可してね）`);
+  }, {timeout:8000, maximumAge:60000});
+}
+
+document.getElementById("refreshBtn").onclick = updateWeather;
+
+document.getElementById("startBtn").onclick = async()=>{
+  await Tone.start();
+  ensureSynth();
+  await ensureAirPlay();
+  if(!weatherData){
+    setStatus("先に「自動取得」を押してね");
+    return;
+  }
+  const btn=document.getElementById("startBtn");
+  if(Tone.Transport.state!=="started"){
+    rebuildLoop();
+    Tone.Transport.start();
+    btn.textContent="Stop";
+    btn.classList.remove("bg-emerald-600");
+    btn.classList.add("bg-rose-600");
+    setStatus("再生中（AirPlayはaudioから切替）");
+  }else{
+    Tone.Transport.stop();
+    if(loop){ loop.stop(); loop.dispose(); loop=null; }
+    btn.textContent="Start";
+    btn.classList.remove("bg-rose-600");
+    btn.classList.add("bg-emerald-600");
+    setStatus("停止中（Startで再開）");
+  }
+};
+
+document.getElementById("pingBtn").onclick = async()=>{
+  await Tone.start();
+  ensureSynth();
+  await ensureAirPlay();
+  synth.triggerAttackRelease("C4","8n",undefined,0.8);
+  setStatus("Ping!");
+};
+
+// 初回
+updateWeather();
+// 5分ごと更新
+setInterval(updateWeather, 300000);
+</script>
+</body>
+</html>
