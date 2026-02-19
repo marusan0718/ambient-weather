@@ -42,10 +42,13 @@
 
 <script>
 const OPEN_METEO = "https://api.open-meteo.com/v1/forecast";
-let synth=null, loop=null, weatherData=null, streamDest=null;
+let sparkle=null, harmony=null, cityPluck=null;
+let sparkleLoop=null, harmonyLoop=null, cityLoop=null;
+let weatherData=null, streamDest=null;
 
 const isRain=c=>[51,53,55,56,57,61,63,65,66,67,80,81,82,95,96,99].includes(c);
 const isClear=c=>(c===0||c===1||c===2);
+const choose=arr=>arr[Math.floor(Math.random()*arr.length)];
 
 function setStatus(t){ document.getElementById("status").textContent=t; }
 
@@ -105,14 +108,43 @@ function applyUI(){
 }
 
 function ensureSynth(){
-  if(synth) return;
-  const reverb=new Tone.Reverb({decay:4, wet:0.30}).toDestination();
-  const filter=new Tone.Filter({type:"lowpass", frequency:1200}).connect(reverb);
-  synth=new Tone.PolySynth(Tone.Synth,{
-    oscillator:{type:"sine"},
-    envelope:{attack:0.01, decay:0.2, sustain:0, release:1.0}
+  if(sparkle) return;
+
+  const reverb=new Tone.Reverb({decay:9.5, wet:0.32}).toDestination();
+  const filter=new Tone.Filter({type:"lowpass", frequency:3200, rolloff:-12}).connect(reverb);
+
+  sparkle = new Tone.FMSynth({
+    harmonicity: 2.2,
+    modulationIndex: 8,
+    oscillator: { type: "sine" },
+    modulation: { type: "triangle" },
+    envelope: { attack: 0.002, decay: 0.12, sustain: 0.0, release: 1.6 },
+    modulationEnvelope: { attack: 0.002, decay: 0.18, sustain: 0.0, release: 0.9 }
   }).connect(filter);
-  synth._filter=filter; synth._reverb=reverb;
+  sparkle.volume.value = -16;
+
+  const harmonyHP = new Tone.Filter({ type: "highpass", frequency: 120, rolloff: -12 });
+  const harmonyLP = new Tone.Filter({ type: "lowpass", frequency: 5200, rolloff: -12 });
+  const harmonyChorus = new Tone.Chorus({ frequency: 0.25, delayTime: 2.8, depth: 0.22, wet: 0.18 }).start();
+  harmony = new Tone.PolySynth(Tone.AMSynth, {
+    harmonicity: 1.5,
+    detune: -4,
+    oscillator: { type: "sine" },
+    modulation: { type: "triangle" },
+    envelope: { attack: 2.0, decay: 0.7, sustain: 0.80, release: 12.0 },
+    modulationEnvelope: { attack: 0.5, decay: 0.6, sustain: 0.25, release: 3.5 }
+  });
+  harmony.chain(harmonyHP, harmonyChorus, harmonyLP, filter);
+  harmony.volume.value = -20;
+
+  const cityPluckHP = new Tone.Filter({ type: "highpass", frequency: 180, rolloff: -12 });
+  const cityPluckChorus = new Tone.Chorus({ frequency: 0.18, delayTime: 3.2, depth: 0.18, wet: 0.14 }).start();
+  const cityPluckDelay = new Tone.PingPongDelay({ delayTime: "8t", feedback: 0.22, wet: 0.20 });
+  cityPluck = new Tone.PluckSynth({ attackNoise: 0.3, dampening: 4200, resonance: 0.92 });
+  cityPluck.volume.value = -22;
+  cityPluck.chain(cityPluckHP, cityPluckChorus, cityPluckDelay, filter);
+
+  sparkle._filter=filter; sparkle._reverb=reverb;
 }
 
 async function ensureAirPlay(){
@@ -129,12 +161,36 @@ function rebuildLoop(){
   if(!weatherData) return;
   const scale=getScale(weatherData.code);
   const interval=windToInterval(weatherData.wind);
+  const dayPart = getDayPartJP();
+  const clear = isClear(weatherData.code);
 
-  if(loop){ loop.dispose(); loop=null; }
-  loop=new Tone.Loop(time=>{
+  if(sparkleLoop){ sparkleLoop.dispose(); sparkleLoop=null; }
+  if(harmonyLoop){ harmonyLoop.dispose(); harmonyLoop=null; }
+  if(cityLoop){ cityLoop.dispose(); cityLoop=null; }
+
+  sparkleLoop=new Tone.Loop(time=>{
     const note=scale[Math.floor(Math.random()*scale.length)];
-    synth.triggerAttackRelease(note, 0.08, time, 0.55);
+    sparkle.triggerAttackRelease(note, 0.10, time, 0.45);
   }, interval).start(0);
+
+  harmonyLoop = new Tone.Loop(time => {
+    const base = scale[0];
+    const i3 = scale[Math.min(2, scale.length - 1)];
+    const i5 = scale[Math.min(4, scale.length - 1)];
+    harmony.triggerAttackRelease([base, i3, i5], 6.5, time, 0.42);
+  }, 5.8).start(0);
+
+  cityLoop = new Tone.Loop(time => {
+    let p = 0.06;
+    if (clear && (dayPart === "朝" || dayPart === "昼")) p = 0.18;
+    if (dayPart === "夕方") p = clear ? 0.12 : 0.07;
+    if (dayPart === "夜") p = 0.03;
+    p *= (1 + 0.18 * (Math.max(0, Math.min(weatherData.wind, 15)) / 15));
+    if (Math.random() < Math.max(0, Math.min(p, 0.35))) {
+      const note = choose(scale.map(n => Tone.Frequency(n).transpose(12).toNote()));
+      cityPluck.triggerAttack(note, time, 0.30 + Math.random() * 0.2);
+    }
+  }, 0.8).start(0);
 }
 
 async function updateWeather(){
@@ -177,7 +233,9 @@ document.getElementById("startBtn").onclick = async()=>{
     setStatus("再生中（AirPlayはaudioから切替）");
   }else{
     Tone.Transport.stop();
-    if(loop){ loop.stop(); loop.dispose(); loop=null; }
+    if(sparkleLoop){ sparkleLoop.stop(); sparkleLoop.dispose(); sparkleLoop=null; }
+    if(harmonyLoop){ harmonyLoop.stop(); harmonyLoop.dispose(); harmonyLoop=null; }
+    if(cityLoop){ cityLoop.stop(); cityLoop.dispose(); cityLoop=null; }
     btn.textContent="Start";
     btn.classList.remove("bg-rose-600");
     btn.classList.add("bg-emerald-600");
@@ -189,7 +247,7 @@ document.getElementById("pingBtn").onclick = async()=>{
   await Tone.start();
   ensureSynth();
   await ensureAirPlay();
-  synth.triggerAttackRelease("C4","8n",undefined,0.8);
+  sparkle.triggerAttackRelease("C4","8n",undefined,0.8);
   setStatus("Ping!");
 };
 
